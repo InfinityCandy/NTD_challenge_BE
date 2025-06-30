@@ -1,3 +1,5 @@
+import logging
+from requests.exceptions import RequestException, Timeout
 import requests
 from planets_connector.models import Planet
 from django.core.management.base import BaseCommand
@@ -9,25 +11,56 @@ class Command(BaseCommand):
     help = "Consumes the third party planets API and inserts the data into the DB"
 
     def handle(self, *args, **options):
-        response = requests.get(URL)
+        try:
+            response = requests.get(URL, timeout=10)
+            response.raise_for_status()
 
-        if response.status_code == 200:
+        except Timeout:
+            self.stderr.write(self.style.ERROR("Request timed out."))
+            return
+
+        except RequestException as e:
+            self.stderr.write(self.style.ERROR(f"Request failed: {str(e)}"))
+            return
+
+        try:
             data = response.json()
-            planets = data["data"]["allPlanets"]["planets"]
+            planets = data.get("data", {}).get(
+                "allPlanets", {}).get("planets", [])
+
+            if not planets:
+                raise ValueError("No planets found in response.")
 
             for planet in planets:
-                Planet.objects.get_or_create(
-                    name=planet["name"],
-                    population=planet["population"],
-                    terrains=planet["terrains"],
-                    climates=planet["climates"]
-                )
+                try:
+                    name = planet["name"]
 
-            self.stdout.write(self.style.SUCCESS(
-                "Planets data successfully saved!")
+                    if not name:
+                        raise ValueError(
+                            "Missing 'name' field in planet data.")
+
+                    Planet.objects.get_or_create(
+                        name=name,
+                        population=planet["population"],
+                        terrains=planet["terrains"],
+                        climates=planet["climates"]
+
+                    )
+
+                except (KeyError, TypeError, ValueError) as e:
+                    self.stderr.write(self.style.WARNING(
+                        f"Skipping invalid planet data: {planet}. Reason: {e}"
+                    ))
+
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"{len(planets)} planet(s) processed successfully."
+                )
             )
 
-        else:
-            self.stdout.write(self.style.ERROR(
-                f"Error: {response.status_code}")
+        except (ValueError, KeyError, TypeError) as e:
+            self.stderr.write(
+                self.style.ERROR(
+                    f"Failed to parse response JSON. Error: {str(e)}"
+                )
             )
